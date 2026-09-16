@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <Configurations>Debug;Release</Configurations>
+  </PropertyGroup>
+
+  <PropertyGroup>
+    <PackageId>GitHubAppSync</PackageId>
+    <Authors>Andrea Bruno</Authors>
+    <Company>Graphene Lab</Company>
+    <Product>GitHubAppSync</Product>
+    <Description>General-purpose application self-update from GitHub Releases. Version-aware (no silent downgrade), SHA-256 verified, with a pluggable update source so a deployment can point at a private repository instead.</Description>
+    <PackageTags>update;self-update;updater;github;releases;sha256</PackageTags>
+    <PackageLicenseFile>LICENSE.md</PackageLicenseFile>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/Graphene-Lab/GitHubAppSync</RepositoryUrl>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The verifier is a separate project nested here for convenience; without this the default
+         recursive glob would pull its sources and its generated obj/AssemblyInfo into this
+         assembly, producing duplicate assembly attributes. -->
+    <Compile Remove="tests/**" />
+    <None Remove="tests/**" />
+    <Content Remove="tests/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="LICENSE.md" Pack="true" PackagePath="\" />
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+</Project>
