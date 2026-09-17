@@ -1,0 +1,43 @@
+name: Publish NuGet Package
+
+# GENERAL release rule (AgentBridge/Graphene convention): a plain push is a code sync and
+# publishes nothing. Publishing is explicit and versioned: push a tag v* (e.g. v1.26.09.15)
+# and this workflow packs GitHubAppSync.csproj and publishes the package to nuget.org.
+#
+# This package must be on nuget.org before a consumer that restores it with a floating
+# "1.*" (e.g. CloudClient) can build in CI: the public CI cannot check out this sibling
+# repo, so it falls back to the NuGet package. Until the first v* tag is pushed here, a
+# consumer release that depends on it will fail to restore.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Pack
+        shell: bash
+        env:
+          VER: ${{ github.ref_name }}
+        run: |
+          VER="${VER#v}"
+          dotnet pack GitHubAppSync.csproj -c Release -o ./out \
+            -p:PackageId=GitHubAppSync -p:Version="$VER"
+      - name: Push to NuGet
+        shell: bash
+        env:
+          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
+        run: |
+          if [ -z "$NUGET_API_KEY" ]; then
+            echo "::error::NUGET_API_KEY secret is not set on this repository — the package was NOT published."
+            exit 1
+          fi
+          dotnet nuget push ./out/*.nupkg --api-key "$NUGET_API_KEY" --source https://api.nuget.org/v3/index.json --skip-duplicate
