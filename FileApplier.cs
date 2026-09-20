@@ -23,24 +23,44 @@ namespace GitHubAppSync
         internal static int ApplyChanged(DirectoryInfo staged, DirectoryInfo target, IEnumerable<string> relativePaths)
         {
             var replaced = 0;
+            // target path -> parked original, so a mid-way failure can be rolled back.
+            var applied = new List<KeyValuePair<string, string>>();
 
-            foreach (var relativePath in relativePaths)
+            try
             {
-                var sourceFile = new FileInfo(Combine(staged.FullName, relativePath));
-                if (!sourceFile.Exists)
-                    continue;
+                foreach (var relativePath in relativePaths)
+                {
+                    var sourceFile = new FileInfo(Combine(staged.FullName, relativePath));
+                    if (!sourceFile.Exists)
+                        continue;
 
-                var targetFile = new FileInfo(Combine(target.FullName, relativePath));
-                targetFile.Directory?.Create();
+                    var targetFile = new FileInfo(Combine(target.FullName, relativePath));
+                    targetFile.Directory?.Create();
 
-                if (targetFile.Exists)
-                    Park(targetFile);
+                    var parked = targetFile.Exists ? Park(targetFile) : null;
 
-                sourceFile.CopyTo(targetFile.FullName, true);
-                replaced++;
+                    sourceFile.CopyTo(targetFile.FullName, true);
+
+                    if (parked != null)
+                        applied.Add(new KeyValuePair<string, string>(targetFile.FullName, parked));
+                    replaced++;
+                }
+
+                return replaced;
             }
+            catch
+            {
+                // A copy failed partway (disk full, a file that cannot be replaced). Restore every
+                // file already moved in from its parked original so the install is never left a mix
+                // of new and old binaries, then rethrow so the caller reports the failure.
+                foreach (var pair in applied)
+                {
+                    try { File.Copy(pair.Value, pair.Key, true); }
+                    catch { /* best effort — the original is still parked in temp */ }
+                }
 
-            return replaced;
+                throw;
+            }
         }
 
         /// <summary>
@@ -70,20 +90,41 @@ namespace GitHubAppSync
                 {
                     // Locked file: leave it. A stale file is preferable to a failed update.
                 }
+                catch (UnauthorizedAccessException)
+                {
+                    // Read-only or access-denied file: leave it, same as a locked file.
+                }
             }
 
             return removed;
         }
 
-        private static string Combine(string root, string relativePath) =>
-            Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar));
+        private static string Combine(string root, string relativePath)
+        {
+            // Defense-in-depth against path traversal: the relative paths come from the snapshot
+            // (always relative, no ".."), but canonicalize and assert the result stays under the
+            // target so a future caller feeding raw zip-entry names cannot escape the install dir.
+            var combined = Path.GetFullPath(
+                Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar)));
+            var rootFull = Path.GetFullPath(root);
+            var rootPrefix = rootFull.EndsWith(Path.DirectorySeparatorChar)
+                ? rootFull
+                : rootFull + Path.DirectorySeparatorChar;
+
+            if (!combined.StartsWith(rootPrefix, StringComparison.Ordinal) &&
+                !string.Equals(combined, rootFull, StringComparison.Ordinal))
+                throw new IOException("Refusing to touch a path outside the target directory: " + relativePath);
+
+            return combined;
+        }
 
         /// <summary>
-        /// Moves an existing file out of the installation so the new one can take its place.
-        /// Falls back to leaving it in place under a backup name only when it cannot be moved
-        /// at all, which is rarer than deleting a locked file succeeding on Windows.
+        /// Moves an existing file out of the installation so the new one can take its place, and
+        /// returns the path it was parked at (so the caller can roll the move back). Falls back to
+        /// leaving it in place under a ".old" backup name only when it cannot be moved to temp at
+        /// all, which is rarer than deleting a locked file succeeding on Windows.
         /// </summary>
-        private static void Park(FileInfo existing)
+        private static string Park(FileInfo existing)
         {
             var parked = Path.Combine(
                 Path.GetTempPath(),
@@ -96,7 +137,7 @@ namespace GitHubAppSync
                 // The parked path is unique, so no overwrite semantics are needed — which matters,
                 // because netstandard2.1 does not offer File.Move with overwrite.
                 File.Move(existing.FullName, parked);
-                return;
+                return parked;
             }
             catch (IOException)
             {
@@ -105,9 +146,9 @@ namespace GitHubAppSync
             {
             }
 
+            var fallback = existing.FullName + ".old";
             try
             {
-                var fallback = existing.FullName + ".old";
                 if (File.Exists(fallback))
                     File.Delete(fallback);
                 File.Move(existing.FullName, fallback);
@@ -117,6 +158,8 @@ namespace GitHubAppSync
                 throw new IOException(
                     "Could not move the existing file \"" + existing.FullName + "\" out of the way to replace it.", ex);
             }
+
+            return fallback;
         }
     }
 }

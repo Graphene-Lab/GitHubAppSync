@@ -26,8 +26,8 @@ namespace GitHubAppSync
     {
         /// <summary>
         /// Walks <paramref name="root"/> and returns one entry per file and directory.
-        /// Hidden entries, entries whose name starts with '_' (the staging backups the apply step
-        /// leaves behind) and <paramref name="excludedFileNames"/> are skipped.
+        /// Hidden entries, the updater's own ".old" parking backups, and
+        /// <paramref name="excludedFileNames"/> are skipped.
         /// </summary>
         internal static List<FileEntry> Create(DirectoryInfo root, ISet<string> excludedFileNames)
         {
@@ -73,8 +73,12 @@ namespace GitHubAppSync
             if ((attributes & FileAttributes.Hidden) != 0)
                 return true;
 
-            // '_' is the prefix the apply step uses to park a file it could not delete while locked.
-            return name.StartsWith("_", StringComparison.Ordinal);
+            // The apply step parks a file it could not move to temp under a "<name>.old" backup
+            // inside the install dir; skip those so they are never mistaken for current app files.
+            // (The old updater parked with a "_" prefix and skipped "_" here — but real payload
+            // folders such as the Blazor "_framework" and "_content" also start with "_", so that
+            // skip silently dropped them and they were never installed or updated.)
+            return name.EndsWith(".old", StringComparison.OrdinalIgnoreCase);
         }
 
         private static string Normalize(string relativePath) => relativePath.Replace('\\', '/');

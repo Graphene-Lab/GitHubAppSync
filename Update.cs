@@ -52,12 +52,13 @@ namespace GitHubAppSync
             if (Debugger.IsAttached)
                 return;
 
-            StopMonitoringUpdates();
-
             var effective = options ?? new UpdateOptions();
 
             lock (Gate)
             {
+                // Dispose the previous monitor inside the same lock as the new one, so two
+                // concurrent calls cannot both install a timer and orphan the first.
+                pollTimer?.Dispose();
                 pollTimer = new Timer(_ =>
                 {
                     try
@@ -80,6 +81,12 @@ namespace GitHubAppSync
             {
                 pollTimer?.Dispose();
                 pollTimer = null;
+
+                // A restart armed by a previous update must stop too, otherwise the process would
+                // still restart after monitoring was explicitly stopped.
+                restartTimer?.Dispose();
+                restartTimer = null;
+                rebootGate = null;
             }
         }
 
@@ -129,7 +136,14 @@ namespace GitHubAppSync
                     VersionText(effective.CurrentVersion), manifest.Version);
 
             var current = effective.CurrentVersion;
-            if (current != null && available <= current)
+            if (current == null)
+                return Result(UpdateStatus.Error,
+                    "The running version could not be determined; set UpdateOptions.CurrentVersion so " +
+                    "the published version can be compared. Refusing to apply a version that cannot be " +
+                    "checked against the running one.",
+                    null, available.ToString());
+
+            if (available <= current)
                 return Result(UpdateStatus.AlreadyUpToDate,
                     "Published " + available + " is not newer than the running " + current + ".",
                     VersionText(current), available.ToString());
@@ -150,18 +164,26 @@ namespace GitHubAppSync
                 }
 
                 // Verified here rather than inside the transport so every source is covered.
-                if (!string.IsNullOrWhiteSpace(manifest.Sha256))
+                // A manifest without a digest is rejected: applying an unverified payload would
+                // bypass the integrity guarantee, so the digest is required, not optional.
+                if (string.IsNullOrWhiteSpace(manifest.Sha256))
                 {
-                    var actual = FileStructure.Sha256File(archive);
-                    if (!string.Equals(actual, manifest.Sha256.Trim(), StringComparison.OrdinalIgnoreCase))
-                    {
-                        TryDeleteFile(archive);
-                        return Result(UpdateStatus.IntegrityFailure,
-                            "SHA-256 mismatch for asset \"" + manifest.Asset + "\": expected " +
-                            manifest.Sha256.Trim().ToLowerInvariant() + ", computed " + actual +
-                            ". Nothing was written.",
-                            VersionText(current), available.ToString());
-                    }
+                    TryDeleteFile(archive);
+                    return Result(UpdateStatus.IntegrityFailure,
+                        "The published manifest carries no SHA-256 for asset \"" + manifest.Asset +
+                        "\"; refusing to apply an unverified payload.",
+                        VersionText(current), available.ToString());
+                }
+
+                var actual = FileStructure.Sha256File(archive);
+                if (!string.Equals(actual, manifest.Sha256.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    TryDeleteFile(archive);
+                    return Result(UpdateStatus.IntegrityFailure,
+                        "SHA-256 mismatch for asset \"" + manifest.Asset + "\": expected " +
+                        manifest.Sha256.Trim().ToLowerInvariant() + ", computed " + actual +
+                        ". Nothing was written.",
+                        VersionText(current), available.ToString());
                 }
 
                 var payload = Path.Combine(staging, "payload");
@@ -186,7 +208,7 @@ namespace GitHubAppSync
                 }
 
                 if (effective.RestartAfterUpdate && isReadyForReboot != null)
-                    ScheduleRestart(isReadyForReboot);
+                    ScheduleRestart(isReadyForReboot, effective);
 
                 return Result(UpdateStatus.Updated,
                     replaced + " file(s) updated to " + available + ".",
@@ -201,18 +223,20 @@ namespace GitHubAppSync
         /// <summary>
         /// Polls the readiness callback until the application allows a restart, then restarts it.
         /// </summary>
-        private static void ScheduleRestart(Func<bool> ready)
+        private static void ScheduleRestart(Func<bool> ready, UpdateOptions options)
         {
             lock (Gate)
             {
                 rebootGate = ready;
                 restartTimer?.Dispose();
-                restartTimer = new Timer(_ =>
+
+                Timer timer = null;
+                timer = new Timer(_ =>
                 {
                     bool ok;
                     try
                     {
-                        ok = rebootGate?.Invoke() == true;
+                        ok = ready?.Invoke() == true;
                     }
                     catch
                     {
@@ -222,14 +246,24 @@ namespace GitHubAppSync
                     if (!ok)
                         return;
 
-                    var timer = restartTimer;
-                    rebootGate = null;
-                    restartTimer = null;
-                    timer?.Dispose();
+                    // Claim the restart under the lock: only act if this timer is still the armed
+                    // one, so a concurrent ScheduleRestart/StopMonitoringUpdates is never clobbered.
+                    lock (Gate)
+                    {
+                        if (!ReferenceEquals(restartTimer, timer))
+                            return;
+                        restartTimer = null;
+                        rebootGate = null;
+                    }
+
+                    timer.Dispose();
 
                     try
                     {
-                        ProcessRestarter.Restart();
+                        if (options?.RestartAction != null)
+                            options.RestartAction();
+                        else
+                            ProcessRestarter.Restart();
                     }
                     catch
                     {
@@ -237,6 +271,8 @@ namespace GitHubAppSync
                         // launch picks them up.
                     }
                 }, null, TimeSpan.FromSeconds(5), TimeSpan.FromMinutes(1));
+
+                restartTimer = timer;
             }
         }
 

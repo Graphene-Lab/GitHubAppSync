@@ -29,7 +29,10 @@ namespace GitHubAppSync.Verify
                 OlderBuildIsNotApplied(root);
                 EqualBuildIsNotApplied(root);
                 NewerBuildIsApplied(root);
+                UnderscorePayloadFilesAreInstalled(root);
                 TamperedPayloadIsRejected(root);
+                MissingDigestIsRejected(root);
+                NullCurrentVersionIsRejected(root);
                 LocalConfigurationSurvivesUpdate(root);
                 PruneRemovesOnlyFilesAbsentUpstream(root);
                 ManifestWireFormatMatchesTheCiHelper(root);
@@ -103,6 +106,58 @@ namespace GitHubAppSync.Verify
             Assert(Read(Path.Combine(install, "keep.dll")) == "unchanged", "identical file left alone");
             Assert(Read(Path.Combine(install, "added.dll")) == "brand-new", "new file added");
             Assert(result.AvailableVersion == "1.26.9.15", "result reports the published version", result.AvailableVersion);
+        }
+
+        private static void UnderscorePayloadFilesAreInstalled(string root)
+        {
+            // Real payload folders can start with '_' (Blazor's "_framework", "_content").
+            // They must install and update — the scanner must not skip them.
+            var install = MakeInstall(root, "underscore", ("app.dll", "old"));
+            var payload = MakePayload(root, "underscore",
+                ("app.dll", "new"),
+                ("_framework/blazor.web.js", "blazor"),
+                ("_content/ui.js", "ui"));
+
+            var result = Update.CheckAndUpdate(
+                new FakeSource(payload.Manifest, payload.Zip), AlwaysReady,
+                Options(install, "1.0.0.0"));
+
+            Assert(result.Status == UpdateStatus.Updated, "underscore payload -> Updated", result);
+            Assert(Read(Path.Combine(install, "_framework", "blazor.web.js")) == "blazor",
+                "underscore payload -> _framework file installed (not skipped)");
+            Assert(Read(Path.Combine(install, "_content", "ui.js")) == "ui",
+                "underscore payload -> _content file installed (not skipped)");
+        }
+
+        private static void MissingDigestIsRejected(string root)
+        {
+            // A manifest with no SHA-256 must be rejected, not applied unverified.
+            var install = MakeInstall(root, "nodigest", ("app.dll", "good"));
+            var payload = MakePayload(root, "nodigest", ("app.dll", "new"));
+            payload.Manifest.Sha256 = "";
+
+            var result = Update.CheckAndUpdate(
+                new FakeSource(payload.Manifest, payload.Zip), AlwaysReady,
+                Options(install, "1.0.0.0"));
+
+            Assert(result.Status == UpdateStatus.IntegrityFailure, "missing digest -> IntegrityFailure", result);
+            Assert(Read(Path.Combine(install, "app.dll")) == "good", "missing digest -> nothing written");
+        }
+
+        private static void NullCurrentVersionIsRejected(string root)
+        {
+            // Without a running version the anti-downgrade compare cannot run; fail closed.
+            var install = MakeInstall(root, "nullver", ("app.dll", "good"));
+            var payload = MakePayload(root, "nullver", ("app.dll", "new"));
+
+            var options = Options(install, "1.0.0.0");
+            options.CurrentVersion = null;
+
+            var result = Update.CheckAndUpdate(
+                new FakeSource(payload.Manifest, payload.Zip), AlwaysReady, options);
+
+            Assert(result.Status == UpdateStatus.Error, "null current version -> Error", result);
+            Assert(Read(Path.Combine(install, "app.dll")) == "good", "null current version -> nothing written");
         }
 
         private static void TamperedPayloadIsRejected(string root)
