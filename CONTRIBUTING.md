@@ -98,8 +98,10 @@ git tag v1.26.09.15 && git push origin v1.26.09.15
 ```
 
 `publish.yml` runs only on a `v*` tag push: it packs `GitHubAppSync.<ver>.nupkg` and pushes
-to NuGet using the `NUGET_API_KEY` secret (it fails fast with `::error::` if the secret is
-missing). A plain `master` push runs nothing — it is a pure code sync.
+to NuGet with trusted publishing — the `NuGet/login@v1` step mints a credential that expires in
+minutes, so there is no `NUGET_API_KEY` secret to set. It fails fast with `::error::` when the
+login is refused, which means the nuget.org policy does not name this repository and this
+`publish.yml`. A plain `master` push runs nothing — it is a pure code sync.
 
 After pushing, confirm the package is live (indexing lags a few minutes):
 
